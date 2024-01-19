@@ -1,3 +1,4 @@
+* This repo is forked because original package claims a lower langchain version requirement in pyproject.toml, which is modified in this forked one. *
 <div align="center">
 
 ![English SDK for Apache Spark](./docs/_static/english-sdk-spark.svg)
