@@ -4,7 +4,7 @@ from langchain.prompts.base import BasePromptTemplate
 from langchain.agents import Agent, AgentOutputParser
 from langchain.agents.mrkl.output_parser import MRKLOutputParser
 from langchain.tools import BaseTool
-from pydantic import Field
+from pydantic.v1 import Field
 
 from pyspark_ai.prompt import (
     SPARK_SQL_PROMPT_VECTOR_SEARCH,

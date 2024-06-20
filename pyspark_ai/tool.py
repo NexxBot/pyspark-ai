@@ -8,7 +8,7 @@ from langchain.callbacks.manager import (
     AsyncCallbackManagerForToolRun,
 )
 from langchain.tools import BaseTool
-from pydantic import Field
+from pydantic.v1 import Field
 from pyspark.sql import SparkSession
 from pyspark_ai.ai_utils import AIUtils
 from pyspark_ai.spark_utils import SparkUtils
