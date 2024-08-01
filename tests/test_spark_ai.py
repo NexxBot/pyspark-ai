@@ -1,14 +1,16 @@
 import logging
+import os
 import unittest
+import warnings
 from io import StringIO
 from unittest.mock import MagicMock
 
-import numpy as np
 from chispa.dataframe_comparer import assert_df_equality
 from langchain.base_language import BaseLanguageModel
 from pyspark.sql import Row, SparkSession
 from pyspark_ai import SparkAI
 from pyspark_ai.search_tool_with_cache import SearchToolWithCache
+from pyspark_ai.spark_utils import SparkUtils
 
 
 class SparkAIInitializationTestCase(unittest.TestCase):
@@ -59,10 +61,10 @@ class TestGetTableCommentFromExplain(unittest.TestCase):
             df = self.create_and_read_table(
                 table_name, [(1, "foo"), (2, "bar")], comment
             )
-            tables = SparkAI._get_tables_from_explain(df)
+            tables = SparkUtils.get_tables_from_explain(df)
             self.assertEqual(tables, [table_name])
             self.assertEqual(
-                self.spark_ai._get_table_comment(df), "which represents comment1"
+                SparkUtils.get_table_comment(df, self.spark), "which represents comment1"
             )
         finally:
             self.spark.sql(f"DROP TABLE IF EXISTS {table_name}")
@@ -78,19 +80,19 @@ class TestGetTableCommentFromExplain(unittest.TestCase):
                 for name in table_names
             ]
             df = dfs[0].join(dfs[1], "col1")
-            tables = SparkAI._get_tables_from_explain(df)
+            tables = SparkUtils.get_tables_from_explain(df)
             self.assertEqual(tables, table_names)
             # Currently we only set the comment when reading a single table
-            self.assertEqual(self.spark_ai._get_table_comment(df), "")
+            self.assertEqual(SparkUtils.get_table_comment(df, self.spark), "")
         finally:
             for name in table_names:
                 self.spark.sql(f"DROP TABLE IF EXISTS {name}")
 
     def test_no_table(self):
         df = self.spark.createDataFrame([(1, "foo"), (2, "bar")], ["col1", "col2"])
-        tables = SparkAI._get_tables_from_explain(df)
+        tables = SparkUtils.get_tables_from_explain(df)
         self.assertEqual(tables, [])
-        self.assertEqual(self.spark_ai._get_table_comment(df), "")
+        self.assertEqual(SparkUtils.get_table_comment(df, self.spark), "")
 
 
 class SparkAITrimTextTestCase(unittest.TestCase):
@@ -118,21 +120,21 @@ class ExtractViewNameTestCase(unittest.TestCase):
         """Tests if the function correctly extracts the view name from a valid CREATE TEMP VIEW query"""
         query = "CREATE TEMP VIEW temp_view AS SELECT * FROM table"
         expected_view_name = "temp_view"
-        actual_view_name = SparkAI._extract_view_name(query)
+        actual_view_name = SparkUtils.extract_view_name(query)
         self.assertEqual(actual_view_name, expected_view_name)
 
     def test_extract_view_name_with_valid_create_or_replace_temp_query(self):
         """Tests if the function correctly extracts the view name from a valid CREATE OR REPLACE TEMP VIEW query"""
         query = "CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM table"
         expected_view_name = "temp_view"
-        actual_view_name = SparkAI._extract_view_name(query)
+        actual_view_name = SparkUtils.extract_view_name(query)
         self.assertEqual(actual_view_name, expected_view_name)
 
     def test_extract_view_name_with_invalid_query(self):
         """Tests if the function correctly raises a ValueError for an invalid query"""
         query = "SELECT * FROM table"
         with self.assertRaises(ValueError) as e:
-            SparkAI._extract_view_name(query)
+            SparkUtils.extract_view_name(query)
         self.assertEqual(
             str(e.exception),
             f"The provided query: '{query}' is not valid for creating a temporary view. Expected pattern: 'CREATE TEMP VIEW [VIEW_NAME] ...'",
@@ -142,14 +144,14 @@ class ExtractViewNameTestCase(unittest.TestCase):
         """Tests if the function correctly handles case insensitivity in the CREATE TEMP VIEW keyword"""
         query = "create temp view temp_view AS SELECT * FROM table"
         expected_view_name = "temp_view"
-        actual_view_name = SparkAI._extract_view_name(query)
+        actual_view_name = SparkUtils.extract_view_name(query)
         self.assertEqual(actual_view_name, expected_view_name)
 
     def test_extract_view_name_with_empty_query(self):
         """Tests if the function correctly raises a ValueError for an empty query"""
         query = ""
         with self.assertRaises(ValueError) as e:
-            SparkAI._extract_view_name(query)
+            SparkUtils.extract_view_name(query)
         self.assertEqual(
             str(e.exception),
             f"The provided query: '{query}' is not valid for creating a temporary view. Expected pattern: 'CREATE TEMP VIEW [VIEW_NAME] ...'",
@@ -257,114 +259,19 @@ class CacheRetrievalTestCase(SparkTestCase):
 
 
 class SparkAnalysisTest(SparkTestCase):
+    @unittest.skipIf(
+        "SPARK_CONNECT_MODE_ENABLE" in os.environ,
+        "_jdf is not supported in SparkConnect",
+    )
     def test_analysis_handling(self):
         self.spark_ai = SparkAI(llm=self.llm_mock)
         df = self.spark.range(100).groupBy("id").count()
-        left = self.spark_ai._get_analyzed_plan_from_explain(df)
+        left = SparkUtils.get_analyzed_plan_from_explain(df)
         right = df._jdf.queryExecution().analyzed().toString()
         self.assertEqual(left, right)
 
 
-class SparkConnectTestCase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.spark = SparkSession.builder.remote("sc://localhost").getOrCreate()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.spark.stop()
-
-
-@unittest.skip("skip until GHA secret key enabled")
-class SparkConnectTests(SparkConnectTestCase):
-    def setUp(self):
-        self.spark_ai = SparkAI(
-            cache_file_location="examples/spark_ai_cache.json", verbose=True
-        )
-        self.spark_ai.activate()
-
-    def test_spark_connect_autodf_e2e(self):
-        try:
-            df = self.spark_ai.create_df(
-                "https://www.carpro.com/blog/full-year-2022-national-auto-sales-by-brand"
-            )
-
-            # Test df aggregation happens before Pandas conversion
-            self.root_logger = logging.getLogger()
-            self.log_capture_string = StringIO()
-            self.ch = logging.StreamHandler(self.log_capture_string)
-            self.root_logger.addHandler(self.ch)
-            df.ai.plot(
-                "pie chart for US sales market shares, show the top 5 brands and the sum of others"
-            )
-            log_contents = self.log_capture_string.getvalue()
-            self.root_logger.removeHandler(self.ch)
-            groupby_index = log_contents.find("groupBy")
-            toPandas_index = log_contents.find("toPandas")
-            self.assertTrue(
-                groupby_index != -1
-                and toPandas_index != -1
-                and groupby_index < toPandas_index,
-                "the aggregation 'groupby' should appear before 'toPandas'",
-            )
-
-            df.ai.explain()
-            df.ai.verify("expect all brands to be unique")
-        except Exception:
-            self.fail("Spark Connect auto_df end-to-end test error")
-
-    def test_spark_connect_transform(self):
-        try:
-            spark = self.spark_ai._spark
-            df = spark.createDataFrame(
-                [
-                    ("children bike", 20),
-                    ("comfort bike", 15),
-                    ("mountain bike", 10),
-                    ("electric bike", 5),
-                    ("road bike", 3),
-                    ("cruisers bike", 8),
-                ],
-                ["product_category", "product_count"],
-            )
-            result = df.ai.transform("list top 3 products by count")
-
-            expected_lst = [
-                Row(product_category="children bike", product_count=20),
-                Row(product_category="comfort bike", product_count=15),
-                Row(product_category="mountain bike", product_count=10),
-            ]
-
-            self.assertEqual(result.collect(), expected_lst)
-        except Exception:
-            self.fail("Spark Connect transform error")
-
-    def test_spark_connect_pivot(self):
-        try:
-            spark = self.spark_ai._spark
-            df = spark.createDataFrame(
-                [
-                    ("A", "English", 45),
-                    ("A", "Maths", 50),
-                    ("B", "English", 75),
-                    ("B", "Maths", 80),
-                    ("C", "English", 90),
-                    ("C", "Science", 100),
-                ],
-                ["Student", "Subject", "Marks"],
-            )
-            result = df.ai.transform("pivot using Subject for Marks")
-
-            expected_lst = [
-                Row(Student="B", English=75, Maths=80, Science=None),
-                Row(Student="C", English=90, Maths=None, Science=100),
-                Row(Student="A", English=45, Maths=50, Science=None),
-            ]
-
-            self.assertEqual(result.collect(), expected_lst)
-        except Exception:
-            self.fail("Spark Connect pivot error")
-
-
 if __name__ == "__main__":
-    unittest.main()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ResourceWarning)
+        unittest.main()
