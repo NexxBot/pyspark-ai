@@ -25,9 +25,9 @@ classifiers = [
 python = "^3.9"
 pydantic = "^2.4"
 openai = "^1.0"
-langchain = "^0.1"
-langchain-community = "^0.0"
 pygments = "^2.15"
+langchain-community = "^0.2.11"
+langchain-experimental = "^0.0.64"
 
 # plot extras
 pandas = { version = ">=1.0.5", optional = true }
@@ -49,6 +49,7 @@ google-api-python-client = { version = "^2.90", optional = true }
 # spark connect extras
 grpcio = { version = ">=1.56.0", optional = true }
 grpcio-status = { version = ">=1.56.0", optional = true }
+
 
 [tool.poetry.group.dev.dependencies]
 pyspark = "^3.4"
